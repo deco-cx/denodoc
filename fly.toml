@@ -1,0 +1,34 @@
+# fly.toml file generated for durable-workers on 2023-01-19T17:43:10-03:00
+
+app = "denodoc-server"
+kill_signal = "SIGINT"
+kill_timeout = 5
+
+[env]
+  PORT = "8081"
+
+[experimental]
+  auto_rollback = true
+
+[processes]
+  app = "run -A ./main.ts"
+
+[[services]]
+  http_checks = []
+  internal_port = 8081
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.tcp_checks]]
+    interval = 10000
+    timeout = 2000
