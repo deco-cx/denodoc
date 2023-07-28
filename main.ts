@@ -1,47 +1,48 @@
-import { deferred } from "https://deno.land/std@0.164.0/async/deferred.ts";
-import { Deferred } from "https://deno.land/std@0.186.0/async/deferred.ts";
+import {
+  crypto,
+  toHashString,
+} from "https://deno.land/std@0.187.0/crypto/mod.ts";
 import { join } from "https://deno.land/std@0.187.0/path/mod.ts";
+
 import { asChannel, Channel } from "./channel.ts";
 import { denoDoc } from "./denodoc.ts";
 
 export interface BeginDenoDocRequest {
   importMap: string;
-  deploymentId: string;
   cwd: string;
 }
 
-export interface DocRequest {
+export interface DocFileRequest {
+  path: string;
+  content: string;
+  hash: string;
+}
+
+export interface DocHttpRequest {
   path: string;
 }
+
+const isDenoDocFileRequest = (v: DocRequest): v is DocFileRequest => {
+  return (v as DocFileRequest)?.content !== undefined;
+};
+export type DocRequest = DocFileRequest | DocHttpRequest;
 
 export interface DocResponse {
   path: string;
   docNodes: string;
 }
 
-export interface FileContentRequest {
-  path: string;
-}
-
-export interface FileContentResponse {
-  path: string;
-  content: string;
-}
-
 const isBeginDocRequest = (
   v: unknown | BeginDenoDocRequest,
 ): v is BeginDenoDocRequest => {
-  return (v as BeginDenoDocRequest).deploymentId !== undefined;
+  return (v as BeginDenoDocRequest).cwd !== undefined;
 };
 
-const isFileContentResponse = (
-  v: unknown | FileContentResponse,
-): v is FileContentResponse => {
-  return (v as FileContentResponse).content !== undefined;
-};
-
-const createIfNotExists = async (req: BeginDenoDocRequest) => {
-  const folder = join("dist", req.deploymentId);
+const createIfNotExists = async (
+  req: BeginDenoDocRequest,
+  importMapDigest: string,
+) => {
+  const folder = join("dist", importMapDigest);
   const importMap = join(folder, "import_map.json");
   try {
     await Deno.stat(importMap);
@@ -56,7 +57,7 @@ const createIfNotExists = async (req: BeginDenoDocRequest) => {
       );
       for (const [key, value] of Object.entries(parsed?.imports ?? {})) {
         if (value === "./") {
-          parsed.imports[key] = `http://localhost:8081/${req.deploymentId}/`;
+          parsed.imports[key] = `http://localhost:8081/`;
         }
       }
 
@@ -71,17 +72,15 @@ const createIfNotExists = async (req: BeginDenoDocRequest) => {
   }
 };
 const creating: Record<string, Promise<string>> = {};
-const clients: Record<
-  string,
-  Channel<DocResponse | FileContentRequest, DocRequest | FileContentResponse>
-> = {};
 
-const fileContentChallenges: Record<string, Deferred<string>> = {};
-const docCache: Record<string, Promise<string>> = {};
+const fileContentChallenges: Record<string, string> = {};
+// content addressable storage
+const CAS: Record<string, Promise<string>> = {};
+const httpModules: Record<string, Promise<string>> = {};
 const useChannel = async (
   c: Channel<
-    DocResponse | FileContentRequest,
-    DocRequest | FileContentResponse
+    DocResponse,
+    DocRequest
   >,
 ) => {
   const firstMessage = await c.recv();
@@ -90,13 +89,14 @@ const useChannel = async (
     c.close();
     return;
   }
-  clients[firstMessage.deploymentId] = c;
-  creating[firstMessage.deploymentId] ??= createIfNotExists(firstMessage)
-    .finally(() => {
-      delete creating[firstMessage.deploymentId];
-    });
+  const hash = await crypto.subtle.digest(
+    "MD5",
+    new TextEncoder().encode(firstMessage.importMap),
+  );
+  const importMapHash = toHashString(hash);
+  creating[importMapHash] ??= createIfNotExists(firstMessage, importMapHash);
 
-  const importMap = await creating[firstMessage.deploymentId];
+  const importMap = await creating[importMapHash];
   // http://localhost:8081/${deploymentId}/$file_path
   while (true) {
     const req = await Promise.race([c.closed.wait(), c.recv()]);
@@ -104,29 +104,34 @@ const useChannel = async (
       break;
     }
 
-    if (isFileContentResponse(req)) {
-      const chal =
-        fileContentChallenges[`${firstMessage.deploymentId}_${req.path}`];
-      if (chal) {
-        chal.resolve(req.content);
-      }
+    if (!isDenoDocFileRequest(req)) {
+      httpModules[req.path] ??= denoDoc(req.path, importMap);
+      httpModules[req.path].then((docNodes) => {
+        if (c.closed.is_set()) {
+          console.log("CLOSE IS SET HTTP");
+          return;
+        }
+        c.send({ path: req.path, docNodes });
+      });
       continue;
     }
-    const id = `${firstMessage.deploymentId}_${req.path}`;
-    docCache[id] ??= denoDoc(
-      req.path.replace(
-        firstMessage.cwd,
-        `http://localhost:8081/${firstMessage.deploymentId}`,
-      ),
+    fileContentChallenges[req.hash] = req.content;
+    CAS[req.hash] ??= denoDoc(
+      `${
+        req.path.replace(
+          firstMessage.cwd,
+          `http://localhost:8081`,
+        )
+      }?hash=${req.hash}`,
       importMap,
       (str: string) =>
         str.replaceAll(
-          `http://localhost:8081/${firstMessage.deploymentId}`,
+          `http://localhost:8081`,
           firstMessage.cwd,
         ),
     );
 
-    docCache[id].then((docNodes) => {
+    CAS[req.hash].then((docNodes) => {
       if (c.closed.is_set()) {
         console.log("CLOSE IS SET");
         return;
@@ -137,7 +142,7 @@ const useChannel = async (
     });
   }
 };
-Deno.serve({ port: 8081 }, async (req) => {
+Deno.serve({ port: 8081 }, (req) => {
   try {
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
@@ -147,7 +152,7 @@ Deno.serve({ port: 8081 }, async (req) => {
       const { socket, response } = Deno.upgradeWebSocket(req);
       socket.binaryType = "arraybuffer";
       asChannel<
-        DocResponse | FileContentRequest,
+        DocResponse,
         DocRequest
       >(socket).then(useChannel).catch((e) => {
         console.log(e);
@@ -157,27 +162,14 @@ Deno.serve({ port: 8081 }, async (req) => {
       });
       return response;
     }
+
+    console.log(url.toString());
     // http://localhost:8081/$deployment_id/$file_path
-    const [_, deploymentId, ...filePathRest] = url.pathname.split("/");
-    const channel = clients[deploymentId];
-    if (!channel) {
+    const hash = url.searchParams.get("hash");
+    if (!hash) {
       return new Response(null, { status: 400 });
     }
-    const filePath = filePathRest.join("/");
-    const id = `${deploymentId}_${filePath}`;
-    const alreadyChall = fileContentChallenges[id];
-    if (alreadyChall) {
-      return new Response(await alreadyChall, { status: 200 });
-    }
-    const response = deferred<string>();
-    fileContentChallenges[id] = response;
-    if (channel.closed.is_set()) {
-      console.log("BAD REQUEST");
-      return new Response(null, { status: 400 });
-    }
-    channel.send({ path: filePath });
-    const content = await response;
-    return new Response(content, { status: 200 });
+    return new Response(fileContentChallenges[hash], { status: 200 });
   } catch (err) {
     console.log(err);
     return new Response(null, { status: 500 });

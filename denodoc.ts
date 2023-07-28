@@ -7,7 +7,7 @@
 export const denoDoc = async (
   path: string,
   importMap: string,
-  replacer: (str: string) => string,
+  replacer?: (str: string) => string,
 ): Promise<string> => {
   const command = new Deno.Command(Deno.execPath(), {
     args: [
@@ -26,5 +26,6 @@ export const denoDoc = async (
     return "[]";
   }
 
-  return replacer(new TextDecoder().decode(stdout));
+  const stdoutString = new TextDecoder().decode(stdout);
+  return replacer ? replacer(stdoutString) : stdoutString;
 };
