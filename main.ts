@@ -76,7 +76,9 @@ const clients: Record<
   Channel<DocResponse | FileContentRequest, DocRequest | FileContentResponse>
 > = {};
 
+const pending: Record<string, boolean> = {};
 const fileContentChallenges: Record<string, Deferred<string>> = {};
+const docCache: Record<string, Promise<string>> = {};
 const useChannel = async (
   c: Channel<
     DocResponse | FileContentRequest,
@@ -100,7 +102,6 @@ const useChannel = async (
   while (true) {
     const req = await Promise.race([c.closed.wait(), c.recv()]);
     if (req === true) {
-      console.log("BREAKED");
       break;
     }
 
@@ -109,19 +110,12 @@ const useChannel = async (
         fileContentChallenges[`${firstMessage.deploymentId}_${req.path}`];
       if (chal) {
         chal.resolve(req.content);
-      } else {
-        console.log("CHALE NOT HERE");
       }
       continue;
     }
-    // deno-lint-ignore no-inferrable-types
-    const id: string = `${firstMessage.deploymentId}_${
-      req.path.replace(`${firstMessage.cwd}/`, "")
-    }`;
-    if (id in fileContentChallenges) {
-      return fileContentChallenges[id];
-    }
-    denoDoc(
+    const id = `${firstMessage.deploymentId}_${req.path}`;
+    pending[id] = true;
+    docCache[id] ??= denoDoc(
       req.path.replace(
         firstMessage.cwd,
         `http://localhost:8081/${firstMessage.deploymentId}`,
@@ -132,7 +126,9 @@ const useChannel = async (
           `http://localhost:8081/${firstMessage.deploymentId}`,
           firstMessage.cwd,
         ),
-    ).then((docNodes) => {
+    );
+
+    docCache[id].then((docNodes) => {
       if (c.closed.is_set()) {
         console.log("CLOSE IS SET");
         return;
@@ -140,6 +136,9 @@ const useChannel = async (
       c.send({ path: req.path, docNodes });
     }).catch((err) => {
       console.log(err, "denodoc err");
+    }).finally(() => {
+      delete pending[id];
+      console.log(Object.keys(pending));
     });
   }
 };
@@ -166,14 +165,12 @@ Deno.serve({ port: 8081 }, async (req) => {
     const [_, deploymentId, ...filePathRest] = url.pathname.split("/");
     const channel = clients[deploymentId];
     if (!channel) {
-      console.log("NOT A CHANNEL", url.pathname);
       return new Response(null, { status: 400 });
     }
     const filePath = filePathRest.join("/");
     const id = `${deploymentId}_${filePath}`;
     const alreadyChall = fileContentChallenges[id];
     if (alreadyChall) {
-      console.log("ALREADY RESOLVED", filePath);
       return new Response(await alreadyChall, { status: 200 });
     }
     const response = deferred<string>();
@@ -182,9 +179,7 @@ Deno.serve({ port: 8081 }, async (req) => {
       console.log("BAD REQUEST");
       return new Response(null, { status: 400 });
     }
-    console.log("WAITING", filePath);
     channel.send({ path: filePath });
-    console.log("RESOLVED", filePath);
     const content = await response;
     return new Response(content, { status: 200 });
   } catch (err) {

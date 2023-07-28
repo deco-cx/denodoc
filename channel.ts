@@ -39,6 +39,8 @@ export const asChannel = async <Send, Recv>(
       if (!closed.is_set()) {
         const stringifiedData = JSON.stringify(data);
         socket.send(stringifiedData);
+      } else {
+        throw new Error("close was set on send");
       }
     },
     recv: async () => {
