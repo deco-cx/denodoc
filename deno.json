@@ -1,0 +1,16 @@
+{
+  "tasks": {
+    "start": "deno run -A main.ts",
+    "check": "deno fmt && deno check main.ts && deno test -A . && deno bench -A .",
+    "proto": "deno run --allow-read https://deno.land/x/grpc_basic@0.4.7/gen/dts.ts ./proto/denodoc.proto > ./denodoc.d.ts"
+  },
+  "fmt": {
+    "files": {
+      "exclude": ["static/", "README.md"]
+    }
+  },
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
+  }
+}

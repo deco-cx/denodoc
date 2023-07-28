@@ -133,12 +133,11 @@ const useChannel = async (
         console.log("CLOSE IS SET");
         return;
       }
+      delete pending[id];
+      console.log(Object.keys(pending));
       c.send({ path: req.path, docNodes });
     }).catch((err) => {
       console.log(err, "denodoc err");
-    }).finally(() => {
-      delete pending[id];
-      console.log(Object.keys(pending));
     });
   }
 };
@@ -150,6 +149,7 @@ Deno.serve({ port: 8081 }, async (req) => {
         return new Response(null, { status: 501 });
       }
       const { socket, response } = Deno.upgradeWebSocket(req);
+      socket.binaryType = "arraybuffer";
       asChannel<
         DocResponse | FileContentRequest,
         DocRequest

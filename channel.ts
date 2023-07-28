@@ -1,5 +1,15 @@
 import { Event } from "https://deno.land/x/async@v1.2.0/event.ts";
 import { Queue } from "https://deno.land/x/async@v2.0.2/mod.ts";
+import {
+  compress,
+  decompress,
+  init,
+} from "https://deno.land/x/zstd_wasm@0.0.20/deno/zstd.ts";
+
+await init();
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export interface Channel<Send, Recv> {
   send: (data: Send) => void;
@@ -13,7 +23,7 @@ export const asChannel = async <Send, Recv>(
   socket: WebSocket,
 ): Promise<Channel<Send, Recv>> => {
   const ready = new Event();
-  const recv = new Queue<string>();
+  const recv = new Queue<Uint8Array>();
   const closed = new Event();
   socket.addEventListener("open", () => {
     ready.set();
@@ -38,14 +48,18 @@ export const asChannel = async <Send, Recv>(
     send: (data: Send) => {
       if (!closed.is_set()) {
         const stringifiedData = JSON.stringify(data);
-        socket.send(stringifiedData);
+        const buffer = encoder.encode(stringifiedData);
+        const compressed = compress(buffer, 10);
+        socket.send(compressed.buffer);
       } else {
+        console.log("close was set on send");
         throw new Error("close was set on send");
       }
     },
     recv: async () => {
       const received = await recv.pop();
-      return received ? JSON.parse(received) : received;
+      const str = decoder.decode(decompress(new Uint8Array(received)));
+      return received ? JSON.parse(str) : received;
     },
     closed,
     ready,
