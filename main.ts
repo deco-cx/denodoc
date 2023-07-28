@@ -76,7 +76,6 @@ const clients: Record<
   Channel<DocResponse | FileContentRequest, DocRequest | FileContentResponse>
 > = {};
 
-const pending: Record<string, boolean> = {};
 const fileContentChallenges: Record<string, Deferred<string>> = {};
 const docCache: Record<string, Promise<string>> = {};
 const useChannel = async (
@@ -114,7 +113,6 @@ const useChannel = async (
       continue;
     }
     const id = `${firstMessage.deploymentId}_${req.path}`;
-    pending[id] = true;
     docCache[id] ??= denoDoc(
       req.path.replace(
         firstMessage.cwd,
@@ -133,8 +131,6 @@ const useChannel = async (
         console.log("CLOSE IS SET");
         return;
       }
-      delete pending[id];
-      console.log(Object.keys(pending));
       c.send({ path: req.path, docNodes });
     }).catch((err) => {
       console.log(err, "denodoc err");
